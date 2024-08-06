@@ -42,7 +42,7 @@ class DenseSparsePreEmbedding(torch.nn.Module):
         self.dense_merge = sg_nn.ConcatenateLinear(fixed_embedding_dim, sparse_embedding_dim, embedding_dim)
 
     def forward(self, fixed_features, sparse_features):
-        fixed_embeddings: torch.Tensor = self.fixed_embedding(fixed_features)
+        fixed_embeddings = self.fixed_embedding(fixed_features)
         sparse_embeddings = fixed_embeddings.new_zeros((fixed_embeddings.shape[0], self.sparse_embedding_dim))
 
         for k, embedding_network in self.feature_embeddings.items():
@@ -76,18 +76,7 @@ class GraphModelCore(torch.nn.Module):
     This component is responsible for the computation that is independent of any
     specific target (edge / node). It is split off to ease sharing with sampling models.
     """
-    def __init__(self, message_passing: torch.nn.Module, node_embedding: torch.nn.Module, edge_embedding: torch.nn.Module, graph_embedding: torch.nn.Module):
-        """Creates a new GraphModelCore with the specified submodules.
-
-        Parameters
-        ----------
-        message_passing : torch.nn.Module
-            Message passing module.
-        node_embedding : torch.nn.Module
-            Node embedding module.
-            This module receives the node features and sparse node features,
-            and produces a dense vector of embeddings for each node.
-        """
+    def __init__(self, message_passing, node_embedding, edge_embedding, graph_embedding):
         super(GraphModelCore, self).__init__()
         self.message_passing = message_passing
         self.node_embedding = node_embedding

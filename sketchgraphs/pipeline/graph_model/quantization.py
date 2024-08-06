@@ -2,12 +2,10 @@
 
 import enum
 import collections
-from typing import Sequence
 
 import numpy as np
 
 from sketchgraphs.data import sketch as datalib
-from sketchgraphs.data.sequence import NodeOp, EdgeOp
 from . import _graph_info as graph_utils
 from .target import TargetType
 
@@ -41,7 +39,7 @@ def _get_param_features(angle_map, length_map):
 
 class EdgeFeatureMapping:
     """Helper class for extracting numerical features from edges. """
-    def __init__(self, angle: 'QuantizationMap'=None, length: 'QuantizationMap'=None):
+    def __init__(self, angle=None, length=None):
         """Creates a new mapping, which uses the specified angle and length quantizers."""
         if angle is None:
             angle = QuantizationMap()
@@ -51,9 +49,6 @@ class EdgeFeatureMapping:
 
         self.angle_map = angle
         self.length_map = length
-
-        # This dictionary describes the features to extract for each
-        # of the given constraints with numerical parameters.
         self._features_by_target = _get_param_features(angle, length)
 
     def state_dict(self):
@@ -67,7 +62,7 @@ class EdgeFeatureMapping:
         self.length_map.load_state_dict(state['length'])
         self._features_by_target = _get_param_features(self.angle_map, self.length_map)
 
-    def sparse_numerical_features(self, edge_ops: Sequence[EdgeOp], target):
+    def sparse_numerical_features(self, edge_ops, target):
         """Creates sparse numeric features from the given edge ops for the given label. """
         index = []
         ops = []
@@ -82,7 +77,7 @@ class EdgeFeatureMapping:
         features = self.numerical_features(ops, target)
         return graph_utils.SparseFeatureBatch(index, features)
 
-    def numerical_features(self, ops: Sequence[EdgeOp], target: TargetType) -> np.ndarray:
+    def numerical_features(self, ops, target) -> np.ndarray:
         feature_desc = self._features_by_target.get(target, {})
         dim = len(feature_desc)
         features = np.empty((len(ops), dim), dtype=np.int64)
@@ -250,24 +245,21 @@ class EntityFeatureMapping:
         return (len(self._features_by_target.get(target, {})) +
                 int(target in (TargetType.NodeArc, TargetType.NodeCircle)) + 1)
 
-    def _numerical_features(self, feature: np.ndarray, params: dict, target: TargetType):
-        """Fill- the given feature array from the parameters of the given operation."""
+    def _numerical_features(self, feature, params, target):
         # First feature is categorical isConstruction feature
         param_bin_edges = self._features_by_target.get(target, {})
 
         feature[0] = int(params['isConstruction'])
         offset = 1
 
-        # Arcs and Circles have additional clockwise feature.
         if target in (TargetType.NodeArc, TargetType.NodeCircle):
             offset += 1
             feature[1] = int(params['clockwise'])
 
-        # Fill in continuous features according to the computed discretization.
-        for i, (param_name, bins) in enumerate(param_bin_edges.items()):
-            feature[i + offset] = int(np.searchsorted(bins, params[param_name]))
+        for i, (param_name, edges) in enumerate(param_bin_edges.items()):
+            feature[i + offset] = int(np.searchsorted(edges, params[param_name]))
 
-    def numerical_features(self, ops: Sequence[NodeOp], target: TargetType) -> np.ndarray:
+    def numerical_features(self, ops, target) -> np.ndarray:
         """Produces a dense array of numerical features.
 
         The operations in the `ops` array must all match the given target type.
@@ -279,7 +271,7 @@ class EntityFeatureMapping:
 
         return features
 
-    def sparse_features_for_target(self, node_ops: Sequence[NodeOp], target: TargetType):
+    def sparse_features_for_target(self, node_ops, target):
         """Produces sparse features for given target type.
 
         This function produces a sparse feature batch for the given sequence of ops
@@ -300,21 +292,14 @@ class EntityFeatureMapping:
 
         return graph_utils.SparseFeatureBatch(index, features)
 
-    def all_sparse_features(self, node_ops: Sequence[NodeOp]):
-        """Returns a dictionary of sparse features corresponding to the operations in
-        the given sequence, grouped by operation type.
-        """
+    def all_sparse_features(self, node_ops):
         return {
             target: self.sparse_features_for_target(node_ops, target)
             for target in TargetType.numerical_node_types()
         }
 
-    def features_from_index(self, index: Sequence[int], target: TargetType):
-        """Obtains categorical features from the given indices.
-
-        This function is used to decode categorical features (encoded as integers)
-        into features corresponding from the operatino parameters.
-        """
+    def features_from_index(self, index, target):
+        """Obtains categorical features from the given indices. """
         features = collections.OrderedDict()
 
         features['isConstruction'] = bool(index[0])
@@ -333,9 +318,6 @@ class EntityFeatureMapping:
 
     @property
     def feature_dimensions(self):
-        """Returns a dictionary describing the number of dimensions (i.e. the number of possible categorical values)
-        for each feature, grouped by target type.
-        """
         return {
             k: collections.OrderedDict(
                 [('isConstruction', 2)] +

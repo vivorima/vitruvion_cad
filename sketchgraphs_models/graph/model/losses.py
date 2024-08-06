@@ -1,7 +1,7 @@
 """This module implements the necessary code to compute losses from the output of the graph model.
 """
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import torch
 
@@ -221,10 +221,10 @@ def compute_losses(readout, batch, feature_dimensions, weights=None):
         Nested dictionary containing loss values for each component
     accuracy : dict
         Nested dictionary containing accuracy for each component
-    edge_predictions: dict[TargetType, Tuple[torch.Tensor, torch.Tensor]]
-        Dictionary containing labels and predictions for each numerical edge feature.
-    node_predictions: dict[TargetType, Tuple[torch.Tensor, torch.Tensor]]
-        Dictionary containing labels and predictions for each numerical edge feature.
+    efeat_labels: dict
+        Dictionary containing labels for each numerical edge feature.
+    efeat_preds: dict
+        Dictionary containing predictions for each numerical edge feature.
     """
     if weights is None:
         weights = {}
@@ -237,8 +237,8 @@ def compute_losses(readout, batch, feature_dimensions, weights=None):
 
     losses = {'edge_features': {}, 'node_features': {}}
     accuracy = {'edge_features': {}, 'node_features': {}}
-    edge_predictions: Dict[target.TargetType, Tuple[torch.Tensor, torch.Tensor]] = {}
-    node_predictions: Dict[target.TargetType, Tuple[torch.Tensor, torch.Tensor]] = {}
+    edge_metrics = {}
+    node_metrics = {}
 
     if count_edge > 0:
         with torch.autograd.profiler.record_function('edge_loss'):
@@ -254,11 +254,11 @@ def compute_losses(readout, batch, feature_dimensions, weights=None):
             with torch.autograd.profiler.record_function('edge_feature_losses'):
                 for t, feature_logit in readout['edge_feature_logits'].items():
                     weight = weights.get(t)
-                    losses['edge_features'][t], accuracy['edge_features'][t], edge_label, edge_pred = compute_feature_loss(
+                    losses['edge_features'][t], accuracy['edge_features'][t], edge_label, edge_prob = compute_feature_loss(
                         feature_logit, batch['edge_numerical'][t], feature_dimensions[t])
                     if weight is not None:
                         losses['edge_features'][t] *= weight
-                    edge_predictions[t] = (edge_label, edge_pred)
+                    edge_metrics[t] = (edge_label, edge_prob)
 
     count_nodes = sum(counts[t] for t in target.TargetType.node_types())
 
@@ -275,11 +275,11 @@ def compute_losses(readout, batch, feature_dimensions, weights=None):
             with torch.autograd.profiler.record_function('entity_feature_loss'):
                 for t, feature_logit in readout['entity_feature_logits'].items():
                     weight = weights.get(t)
-                    losses['node_features'][t], accuracy['node_features'][t], node_label, node_pred = compute_feature_loss(
+                    losses['node_features'][t], accuracy['node_features'][t], node_label, node_prob = compute_feature_loss(
                         feature_logit, batch['node_numerical'][t], feature_dimensions[t])
                     if weight is not None:
                         losses['node_features'][t] *= weight
-                    node_predictions[t] = (node_label, node_pred)
+                    node_metrics[t] = (node_label, node_prob)
 
     if counts[target.TargetType.Subnode] > 0:
         with torch.autograd.profiler.record_function('subnode_loss'):
@@ -290,7 +290,7 @@ def compute_losses(readout, batch, feature_dimensions, weights=None):
                     subnode_graphs_offsets, readout['partner_logits']),
                 weights.get(target.TargetType.Subnode))
 
-    return losses, accuracy, edge_predictions, node_predictions
+    return losses, accuracy, edge_metrics, node_metrics
 
 
 _loss_to_target_type = {
@@ -301,7 +301,7 @@ _loss_to_target_type = {
     'subnode_stop': [target.TargetType.Subnode],
 }
 
-def compute_average_losses(losses, graph_counts) -> Dict[str, torch.Tensor]:
+def compute_average_losses(losses, graph_counts):
     """Computes average losses from sum losses.
 
     Parameters

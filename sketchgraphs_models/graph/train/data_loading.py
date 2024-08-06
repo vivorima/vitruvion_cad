@@ -61,7 +61,7 @@ def load_dataset_and_weights_with_mapping(dataset_file, node_feature_mapping, ed
     seqs = data['sequences']
     seqs.share_memory_()
 
-    ds = dataset.GraphDataset(seqs, node_feature_mapping, edge_feature_mapping, seed=seed)
+    ds = dataset.GraphDataset(seqs, node_feature_mapping, edge_feature_mapping, seed)
 
     return ds, data['sequence_lengths']
 

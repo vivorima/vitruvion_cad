@@ -8,17 +8,27 @@ import enum
 import functools
 import itertools
 import json
-from typing import Any, Dict, List, Tuple, Union, Sequence
+from typing import Dict
 
 import numpy as np
 import torch
-import torch.utils.data
 
 from sketchgraphs.data import sketch as data_sketch, sequence as data_sequence
 
 from sketchgraphs.pipeline.graph_model import GraphInfo, SparseFeatureBatch
 from sketchgraphs.pipeline.graph_model.quantization import EdgeFeatureMapping, EntityFeatureMapping, QuantizationMap
 from sketchgraphs.pipeline.graph_model.target import TargetType, NODE_IDX_MAP, EDGE_IDX_MAP, NODE_IDX_MAP_REVERSE, EDGE_IDX_MAP_REVERSE
+
+
+def _onehot(indices, depth):
+    indices = torch.as_tensor(indices)
+    n, = indices.shape
+    out = indices.new_zeros((n, depth), dtype=torch.float32)
+
+    if n > 0:
+        out.scatter_(1, indices.view(-1, 1), 1)
+
+    return out
 
 
 def _gather_parameters(constr):
@@ -85,13 +95,11 @@ def _sparse_feature_to_torch(sparse_features: Dict[TargetType, SparseFeatureBatc
     }
 
 
-def graph_info_from_sequence(seq, entity_feature_mapping: EntityFeatureMapping, edge_feature_mapping: EdgeFeatureMapping,
-                             node_idx_map: Dict[data_sequence.EntityType, int]=None,
-                             edge_idx_map: Dict[data_sequence.ConstraintType, int]=None):
+def graph_info_from_sequence(seq, entity_feature_mapping: EntityFeatureMapping, edge_feature_mapping: EdgeFeatureMapping):
     """Creates a representation of the sequence as a `GraphInfo` object.
 
     If specified, this function will output the desired feature maps for entities and edges.
-    If not specified, they will be set to `None` instead.
+    If not specified, they will be set to None instead.
 
     Parameters
     ----------
@@ -107,23 +115,15 @@ def graph_info_from_sequence(seq, entity_feature_mapping: EntityFeatureMapping, 
     GraphInfo
         A GraphInfo object representing the sketch.
     """
-    if node_idx_map is None:
-        node_idx_map = NODE_IDX_MAP
-    if edge_idx_map is None:
-        edge_idx_map = EDGE_IDX_MAP
+    node_ops = [op for op in seq if isinstance(op, data_sequence.NodeOp)]
+    edge_ops = [op for op in seq if isinstance(op, data_sequence.EdgeOp)]
 
-    node_ops = [op for op in seq if isinstance(op, data_sequence.NodeOp) and op.label in node_idx_map]
-    edge_ops = [op for op in seq if isinstance(op, data_sequence.EdgeOp) and op.label in edge_idx_map]
-
-    # Do not explicitly encode stop node
     if _is_stop(node_ops[-1]):
         node_ops = node_ops[:-1]
 
-    # Categorical label encoding
-    edge_labels = torch.tensor([edge_idx_map[op.label] for op in edge_ops], dtype=torch.int64)
-    node_labels = torch.tensor([node_idx_map[op.label] for op in node_ops], dtype=torch.int64)
+    edge_labels = torch.tensor([EDGE_IDX_MAP[op.label] for op in edge_ops], dtype=torch.int64)
+    node_labels = torch.tensor([NODE_IDX_MAP[op.label] for op in node_ops], dtype=torch.int64)
 
-    # Compute (symmetrized) edge list
     if len(edge_ops) > 0:
         incidence = torch.tensor([_edge_to_tuple(op) for op in edge_ops], dtype=torch.int64).T.contiguous()
         incidence = torch.cat((incidence, torch.flip(incidence, [0])), dim=1)
@@ -133,13 +133,11 @@ def graph_info_from_sequence(seq, entity_feature_mapping: EntityFeatureMapping, 
     node_features = node_labels
     edge_features = edge_labels.repeat(2)
 
-    # Compute sparse features corresponding to edge features
     if edge_feature_mapping is not None:
         sparse_edge_features = _sparse_feature_to_torch(edge_feature_mapping.all_sparse_features(edge_ops))
     else:
         sparse_edge_features = None
 
-    # Compute sparse features corresponding to node features
     if entity_feature_mapping is not None:
         sparse_node_features = _sparse_feature_to_torch(entity_feature_mapping.all_sparse_features(node_ops))
     else:
@@ -187,9 +185,7 @@ def _set_graph_schema(graph, entity_feature_mapping: EntityFeatureMapping, edge_
         graph.sparse_edge_features = _sparse_feature_to_torch(edge_feature_mapping.all_sparse_features([]))
 
 
-def collate(batch, entity_feature_mapping: EntityFeatureMapping = None, edge_feature_mapping: EdgeFeatureMapping = None,
-            node_idx_map: Dict[data_sequence.EntityType, int]=None,
-            edge_idx_map: Dict[data_sequence.ConstraintType, int]=None):
+def collate(batch, entity_feature_mapping: EntityFeatureMapping = None, edge_feature_mapping: EdgeFeatureMapping = None):
     """Collates a batch of examples into a single dictionary suitable for batched computation.
 
     Parameters
@@ -230,14 +226,9 @@ def collate(batch, entity_feature_mapping: EntityFeatureMapping = None, edge_fea
     _set_graph_schema(graph_subnode_targets, entity_feature_mapping, edge_feature_mapping)
 
     # Labels for node / edge type prediction
-    if node_idx_map is None:
-        node_idx_map = NODE_IDX_MAP
-    if edge_idx_map is None:
-        edge_idx_map = EDGE_IDX_MAP
-
-    node_label = torch.tensor([node_idx_map[op.label] for node_type in TargetType.node_types() for op in group_targets[node_type]],
+    node_label = torch.tensor([NODE_IDX_MAP[op.label] for node_type in TargetType.node_types() for op in group_targets[node_type]],
                               dtype=torch.int64)
-    edge_label = torch.tensor([edge_idx_map[op.label] for edge_type in TargetType.edge_types() for op in group_targets[edge_type]],
+    edge_label = torch.tensor([EDGE_IDX_MAP[op.label] for edge_type in TargetType.edge_types() for op in group_targets[edge_type]],
                               dtype=torch.int64)
 
     edge_partner = torch.cat([
@@ -266,9 +257,8 @@ def collate(batch, entity_feature_mapping: EntityFeatureMapping = None, edge_fea
 
     return result
 
-ConstructionOp = Union[data_sequence.NodeOp, data_sequence.EdgeOp]
 
-class GraphDataset(torch.utils.data.Dataset[Tuple[GraphInfo, ConstructionOp]]):
+class GraphDataset(torch.utils.data.Dataset):
     """Dataset for numerical constraint model.
 
     This dataset processes the main data format for graph models, that is, it represents
@@ -276,96 +266,30 @@ class GraphDataset(torch.utils.data.Dataset[Tuple[GraphInfo, ConstructionOp]]):
     Additionally, it also optionally outputs sparse features for the entities or the edges.
     """
 
-    def __init__(self, sequences: Sequence[List[ConstructionOp]], node_feature_mapping=None, edge_feature_mapping=None,
-                 node_idx_map: Dict[data_sequence.EntityType, int]=None,
-                 edge_idx_map: Dict[data_sequence.ConstraintType, int]=None,
-                 seed=None):
-
-        if node_idx_map is None:
-            node_idx_map = NODE_IDX_MAP
-        if edge_idx_map is None:
-            edge_idx_map = EDGE_IDX_MAP
-
+    def __init__(self, sequences, node_feature_mapping=None, edge_feature_mapping=None, seed=None):
         self.sequences = sequences
         self.rng = np.random.RandomState(seed)
         self.edge_feature_mapping = edge_feature_mapping
         self.node_feature_mapping = node_feature_mapping
 
-        self.node_idx_map = node_idx_map
-        self.edge_idx_map = edge_idx_map
-
     def __len__(self):
         return len(self.sequences)
-
-
-    def _op_valid(self, op: ConstructionOp) -> bool:
-        if isinstance(op, data_sequence.NodeOp):
-            return op.label in self.node_idx_map
-        else:
-            return op.label in self.edge_idx_map
-
-
-    def _filter_sequence(self, seq: Sequence[ConstructionOp]) -> Sequence[ConstructionOp]:
-        return [op for op in seq if self._op_valid(op)]
-
-    def _sequence_target_indices(self, seq: Sequence[ConstructionOp]) -> List[int]:
-        return [i for i, op in enumerate(seq) if i > 0 and not _is_subnode_edge(op)]
-
-    def _get_partial_sequence_info(self, seq, step_idx: int):
-        graph = graph_info_from_sequence(
-            seq[:step_idx],
-            entity_feature_mapping=self.node_feature_mapping,
-            edge_feature_mapping=self.edge_feature_mapping,
-            node_idx_map=self.node_idx_map,
-            edge_idx_map=self.edge_idx_map)
-
-        target = seq[step_idx]
-
-        return graph, target
-
 
     def __getitem__(self, idx):
         idx = idx % len(self)  # allows using batch size larger than dataset
         seq = self.sequences[idx]
-        seq = self._filter_sequence(seq)
 
         # Exclude first step since we always start w/ external node
         # Exclude subnode edges since they can be inferred by the subnode op.
-        step_indices = self._sequence_target_indices(seq)
+        step_indices = [i for i, op in enumerate(seq) if i > 0 and not _is_subnode_edge(op)]
+
         step_idx = self.rng.choice(step_indices)
 
-        return self._get_partial_sequence_info(seq, step_idx)
+        try:
+            graph = graph_info_from_sequence(seq[:step_idx], self.node_feature_mapping, self.edge_feature_mapping)
+        except Exception as e:
+            raise ValueError('Failed to process sequence at index {0}'.format(idx)) from e
 
+        target = seq[step_idx]
 
-class FullTargetsGraphDataset(GraphDataset):
-    """Dataset for graph model.
-
-    This dataset is similar to `GraphDataset`, but exposes all targets for each graph
-    as distinct indices (instead of randomly selecting some indices).
-    Note that this causes samples at different indices to be correlated, so splitting
-    on this dataset is not recommended.
-
-    """
-    def __init__(self, sequences: Sequence[List[ConstructionOp]], node_feature_mapping=None, edge_feature_mapping=None,
-                 node_idx_map: Dict[data_sequence.EntityType, int]=None,
-                 edge_idx_map: Dict[data_sequence.ConstraintType, int]=None):
-        super().__init__(sequences, node_feature_mapping, edge_feature_mapping, node_idx_map, edge_idx_map)
-
-        target_counts = np.array([len(self._sequence_target_indices(self._filter_sequence(seq))) for seq in self.sequences], dtype=np.int32)
-        target_offsets = np.zeros(len(target_counts) + 1, dtype=np.int32)
-        np.cumsum(target_counts, out=target_offsets[1:])
-
-        self._target_offsets = target_offsets
-
-    def __len__(self):
-        return self._target_offsets[-1]
-
-    def __getitem__(self, idx):
-        sequence_idx = np.searchsorted(self._target_offsets, idx, side='right') - 1
-        seq = self.sequences[idx]
-        seq = self._filter_sequence(seq)
-
-        step_indices = self._sequence_target_indices(seq)
-        step_idx = step_indices[idx - self._target_offsets[sequence_idx]]
-
-        return self._get_partial_sequence_info(seq, step_idx)
+        return graph, target
